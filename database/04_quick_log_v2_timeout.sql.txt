@@ -1,0 +1,11 @@
+-- REVIEW ONLY: no existing flags are changed by installing this procedure.
+USE ApplicationDb1;
+GO
+CREATE OR ALTER PROCEDURE dbo.CC_Q AS
+BEGIN
+ -- CC_QUICK_LOG_V2_20261006
+ SET NOCOUNT ON;
+ -- Timeout notifications must never mark an unconfirmed Zoho record complete.
+ UPDATE ApplicationDb5.dbo.CC_quick_log SET email=2 WHERE email=1;
+END;
+GO

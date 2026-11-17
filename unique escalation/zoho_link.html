@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zoho Link Report</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: radial-gradient(circle at top, #111827, #0b0f1a 60%);
+        color: #e5e7eb;
+      }
+      .wrap {
+        min-height: 100vh;
+        padding: 40px 20px;
+        display: flex;
+        justify-content: center;
+      }
+      .card {
+        width: 100%;
+        max-width: 1100px;
+        background: rgba(17, 24, 39, 0.85);
+        border: 1px solid #1f2937;
+        border-radius: 16px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+        padding: 24px;
+      }
+      h1 {
+        margin: 0 0 6px 0;
+        font-size: 22px;
+      }
+      .sub {
+        color: #9ca3af;
+        font-size: 13px;
+        margin-bottom: 16px;
+      }
+      .toolbar {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+      .search {
+        flex: 1;
+        background: #0f172a;
+        border: 1px solid #1f2937;
+        color: #e5e7eb;
+        padding: 10px 12px;
+        border-radius: 10px;
+        font-size: 13px;
+      }
+      .hint {
+        color: #6b7280;
+        font-size: 12px;
+      }
+      .btn.home {
+        border-color: #38bdf8;
+        color: #e0f2fe;
+        background: linear-gradient(120deg, rgba(56, 189, 248, 0.2), rgba(14, 165, 233, 0.1));
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      thead th {
+        text-align: left;
+        color: #93c5fd;
+        font-weight: 600;
+        padding: 10px 12px;
+        border-bottom: 1px solid #1f2937;
+        cursor: pointer;
+        user-select: none;
+      }
+      thead th.sort-asc::after {
+        content: " ▲";
+        color: #9ca3af;
+        font-size: 11px;
+      }
+      thead th.sort-desc::after {
+        content: " ▼";
+        color: #9ca3af;
+        font-size: 11px;
+      }
+      tbody td {
+        padding: 10px 12px;
+        border-bottom: 1px solid #111827;
+      }
+      tbody tr:nth-child(even) {
+        background: rgba(31, 41, 55, 0.35);
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .btn {
+        border: 1px solid #1f2937;
+        background: #0f172a;
+        color: #e5e7eb;
+        padding: 6px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .btn:hover {
+        border-color: #3b82f6;
+        color: #93c5fd;
+      }
+      .btn.disabled {
+        opacity: 0.5;
+        pointer-events: none;
+      }
+      .badge {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        border: 1px solid #334155;
+        color: #cbd5f5;
+        background: rgba(15, 23, 42, 0.7);
+      }
+      .badge.green {
+        border-color: #10b981;
+        color: #bbf7d0;
+        background: rgba(16, 185, 129, 0.15);
+      }
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(2, 6, 23, 0.75);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        z-index: 50;
+      }
+      .modal {
+        width: 100%;
+        max-width: 640px;
+        background: radial-gradient(circle at top, rgba(30, 64, 175, 0.18), rgba(2, 6, 23, 0.95) 55%);
+        border: 1px solid #1f2937;
+        border-radius: 16px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+        padding: 20px;
+      }
+      .modal h2 {
+        margin: 0 0 6px 0;
+        font-size: 18px;
+      }
+      .modal .meta {
+        color: #9ca3af;
+        font-size: 12px;
+        margin-bottom: 14px;
+      }
+      .panel {
+        border: 1px solid #1f2937;
+        border-radius: 14px;
+        padding: 12px;
+        background: rgba(2, 6, 23, 0.7);
+      }
+      .chips {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      .chip {
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid #1f2937;
+        background: rgba(15, 23, 42, 0.8);
+        font-size: 12px;
+        color: #cbd5f5;
+      }
+      .kv {
+        display: grid;
+        gap: 6px;
+        font-size: 13px;
+      }
+      .kv b {
+        color: #93c5fd;
+        font-weight: 600;
+      }
+      .dropdown {
+        border: 1px solid #1f2937;
+        background: #0f172a;
+        border-radius: 12px;
+        padding: 10px;
+      }
+      .dropdown input {
+        width: 100%;
+        background: transparent;
+        border: none;
+        color: #e5e7eb;
+        font-size: 13px;
+        outline: none;
+        padding: 6px 4px 10px 4px;
+      }
+      .options {
+        max-height: 260px;
+        overflow: auto;
+        display: grid;
+        gap: 6px;
+      }
+      .option {
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(31, 41, 55, 0.4);
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .option:hover,
+      .option.active {
+        background: rgba(59, 130, 246, 0.2);
+        color: #bfdbfe;
+      }
+      .modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        margin-top: 16px;
+      }
+      .btn.primary {
+        border-color: #3b82f6;
+        color: #bfdbfe;
+        background: linear-gradient(120deg, rgba(59, 130, 246, 0.2), rgba(14, 165, 233, 0.2));
+      }
+      .btn.alt {
+        border-color: #10b981;
+        color: #bbf7d0;
+        background: linear-gradient(120deg, rgba(16, 185, 129, 0.2), rgba(34, 197, 94, 0.15));
+      }
+      .muted {
+        color: #9ca3af;
+        font-size: 12px;
+      }
+      .loading {
+        padding: 10px 0;
+      }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        background: rgba(15, 23, 42, 0.95);
+        border: 1px solid #1f2937;
+        color: #e5e7eb;
+        padding: 12px 14px;
+        border-radius: 12px;
+        font-size: 13px;
+        box-shadow: 0 16px 30px rgba(0, 0, 0, 0.45);
+        display: none;
+        z-index: 60;
+      }
+      .toast.success {
+        border-color: #22c55e;
+        color: #bbf7d0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Escalation Lists Mapping</h1>
+        <div class="sub">Company, Fleet, and Zoho Account mapping</div>
+        <div class="toolbar">
+          <a
+            class="btn home"
+            href="https://example.invalid/configure-endpoint"
+          >Home</a>
+          <input
+            id="filter"
+            class="search"
+            type="text"
+            placeholder="Filter by company, fleet, or Zoho account..."
+            autocomplete="off"
+          />
+          <div class="hint">Click a column to sort</div>
+        </div>
+        <div id="status" class="muted loading">Loading data...</div>
+        <table>
+          <thead>
+            <tr>
+              <th data-key="Company">Company</th>
+              <th data-key="Fleet">Fleet</th>
+              <th data-key="ZohoAccount">Zoho Account</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <h2 id="modalTitle">Edit Mapping</h2>
+        <div id="modalMeta" class="meta"></div>
+        <div id="selectPanel" class="panel">
+          <div class="dropdown">
+            <input id="zohoSearch" type="text" placeholder="Search Zoho accounts..." autocomplete="off" />
+            <div id="zohoOptions" class="options"></div>
+          </div>
+          <div class="modal-actions">
+            <button id="cancelBtn" class="btn" type="button">Cancel</button>
+            <button id="saveBtn" class="btn primary" type="button" disabled>Review Update</button>
+          </div>
+        </div>
+        <div id="confirmPanel" class="panel" style="display: none;">
+          <div class="kv">
+            <div><b>Company:</b> <span id="confirmCompany"></span></div>
+            <div><b>Fleet:</b> <span id="confirmFleet"></span></div>
+            <div><b>Old Zoho Account:</b> <span id="confirmOld"></span></div>
+            <div><b>New Zoho Account:</b> <span id="confirmNew"></span></div>
+          </div>
+          <div class="chips">
+            <span class="chip">This will update mapping</span>
+            <span class="chip">Zoho opens in new tab</span>
+          </div>
+          <div class="modal-actions">
+            <button id="backBtn" class="btn" type="button">Back</button>
+            <button id="confirmBtn" class="btn primary" type="button">Confirm Update</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/CC_Escalation/unique%20escalation/zoho_link_accounts.js" defer></script>
+    <script src="/CC_Escalation/unique%20escalation/zoho_link.js" defer></script>
+  </body>
+</html>

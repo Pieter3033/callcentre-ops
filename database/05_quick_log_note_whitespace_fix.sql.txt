@@ -1,0 +1,197 @@
+-- PREPARED ONLY: changes the shared SQL worker; requires explicit authorization.
+-- Does not remove Zoho rows, change saved notes, or requeue failed/uncertain records.
+-- Reviewed installed definition SHA256: F600062BD6EFC97B6F8D5A934C9A2619CACE43AE021311C9E7515A22131B5053
+USE ApplicationDb5;
+GO
+CREATE OR ALTER PROCEDURE dbo.CC_quick_log_sp AS
+BEGIN
+ -- CC_QUICK_LOG_V2_20261006
+ -- CC_QUICK_LOG_CLOSED_ONLY_20261006
+ SET NOCOUNT ON;
+ SET XACT_ABORT ON;
+ -- CC_QUICK_LOG_NOTE_WHITESPACE_20261007: Zoho trims boundary whitespace.
+ DECLARE @noteTrim nvarchar(32)=NCHAR(9)+NCHAR(10)+NCHAR(11)+NCHAR(12)+NCHAR(13)+NCHAR(32)+NCHAR(160)+NCHAR(5760)+NCHAR(8192)+NCHAR(8193)+NCHAR(8194)+NCHAR(8195)+NCHAR(8196)+NCHAR(8197)+NCHAR(8198)+NCHAR(8199)+NCHAR(8200)+NCHAR(8201)+NCHAR(8202)+NCHAR(8232)+NCHAR(8233)+NCHAR(8239)+NCHAR(8287)+NCHAR(12288)+NCHAR(65279);
+ DECLARE @lock int,@case int=NULL,@revision int,@attempts int,@id nvarchar(50),@reference nvarchar(100),@reg nvarchar(50),@event nvarchar(100),
+ @opened datetime,@closed bit,@closedAt datetime,@agent nvarchar(200),@http int,@transport int,@response nvarchar(max),@payload nvarchar(max),
+ @code nvarchar(100),@error nvarchar(500),@state nvarchar(24)=N'Retry',@url nvarchar(500),@managed bit,@untracked bit,@installedAt datetime,@operation varchar(8)=NULL;
+ EXEC @lock=sys.sp_getapplock @Resource=N'CCQuickLogWorkerV2',@LockMode='Exclusive',@LockOwner='Session',@LockTimeout=0;
+ IF @lock<0 RETURN;
+ DECLARE @rows TABLE(CommID int NULL,RowOrder int,CommType nvarchar(100),ContactName nvarchar(200),RawPhone nvarchar(100),Phone nvarchar(32),Email nvarchar(200),Notes nvarchar(max),Agent nvarchar(200),CommTime datetime,ZohoRowID nvarchar(50),RemoteID nvarchar(50));
+ DECLARE @remote TABLE(id nvarchar(50) PRIMARY KEY,CommType nvarchar(100),ContactName nvarchar(200),Phone nvarchar(32),Email nvarchar(200),Notes nvarchar(max),Agent nvarchar(200),CommTime datetime);
+ BEGIN TRY
+  -- An interrupted create is never blindly POSTed again.
+  UPDATE s SET SyncState=N'Uncertain',LastError=N'A create request was interrupted. Reconcile this case in Zoho before retrying.'
+  FROM ApplicationDb1.dbo.CCQuickLogSync s JOIN dbo.CC_quick_log q ON q.seqno=s.CaseID
+  WHERE s.CreateInFlight=1 AND q.zoho_id IS NULL AND s.LastAttempt<DATEADD(minute,-5,SYSDATETIME());
+  UPDATE ApplicationDb1.dbo.CCQuickLogSync SET SyncState=N'Retry',NextAttempt=SYSDATETIME()
+  WHERE SyncState=N'Sending' AND CreateInFlight=0 AND LastAttempt<DATEADD(minute,-5,SYSDATETIME());
+  -- FIFO among due eligible rows; failed/uncertain rows cannot monopolise the job.
+  SELECT @installedAt=modify_date FROM sys.objects WHERE object_id=@@PROCID;
+  SELECT TOP(1) @case=q.seqno,@id=NULLIF(LTRIM(RTRIM(q.zoho_id)),N''),@reference=NULLIF(LTRIM(RTRIM(q.reference)),N''),@reg=q.reg_no,@event=q.event,
+  @opened=q.datetime_opened,@closed=CASE WHEN TRY_CONVERT(int,LTRIM(RTRIM(q.[close])))=1 THEN 1 ELSE 0 END,@agent=q.cc_operator
+  FROM dbo.CC_quick_log q LEFT JOIN ApplicationDb1.dbo.CCQuickLogSync s ON s.CaseID=q.seqno
+  WHERE TRY_CONVERT(int,q.[close])=1 AND q.zoho_insert=1 AND (s.CaseID IS NULL OR (s.SyncState IN(N'Pending',N'Retry') AND s.NextAttempt<=SYSDATETIME() AND s.CreateInFlight=0))
+   AND (s.CaseID IS NOT NULL OR NULLIF(LTRIM(RTRIM(q.zoho_id)),N'') IS NOT NULL OR q.datetime_opened>=@installedAt)
+  ORDER BY COALESCE(s.NextAttempt,q.datetime_opened),q.seqno;
+  IF @case IS NULL GOTO Finish;
+  SET @untracked=CASE WHEN EXISTS(SELECT 1 FROM ApplicationDb1.dbo.CCQuickLogSync WHERE CaseID=@case) THEN 0 ELSE 1 END;
+  MERGE ApplicationDb1.dbo.CCQuickLogSync WITH(HOLDLOCK) AS target USING(SELECT @case AS CaseID) source ON target.CaseID=source.CaseID
+  WHEN NOT MATCHED THEN INSERT(CaseID) VALUES(@case);
+  UPDATE ApplicationDb1.dbo.CCQuickLogSync SET SyncState=N'Sending',Attempts=Attempts+1,LastAttempt=SYSDATETIME() WHERE CaseID=@case;
+  SELECT @revision=Revision,@attempts=Attempts,@closedAt=ClosedAt FROM ApplicationDb1.dbo.CCQuickLogSync WHERE CaseID=@case;
+  -- Historic missing IDs do not prove absence from Zoho. Hold them for explicit reconciliation.
+  -- Newly created legacy single-row cases remain compatible during a coordinated rollout.
+  IF @id IS NULL AND @untracked=1 AND (@opened IS NULL OR @opened<@installedAt)
+  BEGIN SET @state=N'Uncertain'; SET @error=N'This historical case has no confirmed Zoho ID. Reconcile previous API results before authorizing a create.'; GOTO Failed; END;
+  SET @managed=CASE WHEN EXISTS(SELECT 1 FROM ApplicationDb1.dbo.quick_log_Comments WHERE case_id=@case) THEN 1 ELSE 0 END;
+  IF @managed=1
+   INSERT @rows SELECT comm_id,COALESCE(DisplayOrder,comm_id),comm_type,contact_name,contact_no,ApplicationDb1.dbo.CCQuickLog_NormalizePhone(contact_no),email_address,
+    comments,cc_operator,datetime_comm,zoho_row_id,NULL
+    FROM ApplicationDb1.dbo.quick_log_Comments WHERE case_id=@case;
+  ELSE
+   INSERT @rows SELECT NULL,1,comm_type,c_name,c_number,ApplicationDb1.dbo.CCQuickLog_NormalizePhone(c_number),NULL,comments,cc_operator,COALESCE(datetime_comm,datetime_opened),NULL,NULL FROM dbo.CC_quick_log WHERE seqno=@case;
+  -- GET-only recovery for legacy IDs: never create another parent to recover a reference.
+  IF @id IS NOT NULL
+  BEGIN
+   IF @id COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9]%' BEGIN SET @state=N'Failed'; SET @error=N'The stored Zoho ID is invalid. Reconcile the case before retrying.'; GOTO Failed; END;
+   SET @url=N'https://example.invalid/configure-endpoint'+@id;
+   EXEC ApplicationDb1.dbo.CCQuickLog_Http 'GET',@url,NULL,@http OUTPUT,@response OUTPUT,@transport OUTPUT;
+   IF @transport<>0 OR ISNULL(@http,0)<>200 OR ISNULL(ISJSON(@response),0)<>1 BEGIN SET @error=N'Zoho lookup failed; existing ID retained.'; GOTO Failed; END;
+   SET @reference=JSON_VALUE(@response,'$.data[0].Incident_No');
+   IF ISNULL(JSON_VALUE(@response,'$.data[0].id'),N'')<>@id BEGIN SET @state=N'Failed'; SET @error=N'Zoho returned an unexpected parent ID.'; GOTO Failed; END;
+   IF UPPER(LTRIM(RTRIM(ISNULL(JSON_VALUE(@response,'$.data[0].Reg_No'),N''))))<>UPPER(LTRIM(RTRIM(@reg)))
+   BEGIN SET @state=N'Failed'; SET @error=N'The Zoho parent registration does not match this case. Reconcile the stored ID.'; GOTO Failed; END;
+   IF ISNULL(JSON_VALUE(@response,'$.data[0].Incident_Type'),N'')<>ISNULL((SELECT incident_type FROM dbo.CC_quick_log WHERE seqno=@case),N'')
+   BEGIN SET @state=N'Failed'; SET @error=N'The Zoho parent incident type does not match this case. Reconcile the stored ID.'; GOTO Failed; END;
+   IF @managed=0
+   BEGIN
+    IF @closed=1 AND ISNULL(JSON_VALUE(@response,'$.data[0].CLOSED'),N'')<>N'true'
+    BEGIN SET @state=N'Failed'; SET @error=N'The existing Zoho case does not confirm closure. Review the legacy case before completing it.'; GOTO Failed; END;
+    GOTO Confirmed;
+   END;
+   IF JSON_QUERY(@response,'$.data[0].Communication_Log') IS NULL
+   BEGIN SET @state=N'Failed'; SET @error=N'Zoho did not return communication history. Check API access before appending entries.'; GOTO Failed; END;
+   INSERT @remote SELECT id,CommType,ContactName,ApplicationDb1.dbo.CCQuickLog_NormalizePhone(Phone),Email,Notes,Agent,
+    TRY_CONVERT(datetime,SWITCHOFFSET(TRY_CONVERT(datetimeoffset,CommTime,127),'+02:00'))
+    FROM OPENJSON(@response,'$.data[0].Communication_Log') WITH(id nvarchar(50),CommType nvarchar(100) '$.CR_Event_Type_of_Comms',ContactName nvarchar(200) '$.CR_Event_Contact_Name',Phone nvarchar(100) '$.CR_Event_Contact_No',Email nvarchar(200) '$.Email_Address',Notes nvarchar(max) '$.CR_Event_Comments1',Agent nvarchar(200) '$.CR_Event_Control_Room_Agent',CommTime nvarchar(40) '$.CR_Event_Date_Time_of_Comms');
+   -- Keep known immutable row IDs, then match unknown rows once, including identical entries.
+   UPDATE r SET RemoteID=d.id FROM @rows r JOIN @remote d ON d.id=r.ZohoRowID
+    AND COALESCE(d.CommType,N'')=COALESCE(r.CommType,N'') COLLATE Latin1_General_100_BIN2
+    AND COALESCE(d.ContactName,N'')=COALESCE(r.ContactName,N'') COLLATE Latin1_General_100_BIN2
+    AND COALESCE(d.Phone,N'')=COALESCE(r.Phone,N'') COLLATE Latin1_General_100_BIN2
+    AND COALESCE(d.Email,N'')=COALESCE(r.Email,N'') COLLATE Latin1_General_100_BIN2
+    AND TRIM(@noteTrim FROM REPLACE(REPLACE(COALESCE(d.Notes,N''),NCHAR(13)+NCHAR(10),NCHAR(10)),NCHAR(13),NCHAR(10)))=TRIM(@noteTrim FROM REPLACE(REPLACE(COALESCE(r.Notes,N''),NCHAR(13)+NCHAR(10),NCHAR(10)),NCHAR(13),NCHAR(10))) COLLATE Latin1_General_100_BIN2
+    AND COALESCE(d.Agent,N'')=COALESCE(r.Agent,N'') COLLATE Latin1_General_100_BIN2
+    AND d.CommTime=TRY_CONVERT(datetime,CONVERT(varchar(19),r.CommTime,126),126);
+   IF EXISTS(SELECT 1 FROM @rows WHERE ZohoRowID IS NOT NULL AND RemoteID IS NULL)
+   BEGIN SET @state=N'Failed'; SET @error=N'A previously confirmed Zoho communication is missing or has changed. Reconcile it before retrying.'; GOTO Failed; END;
+   DECLARE @comm int,@remoteId nvarchar(50);
+   WHILE EXISTS(SELECT 1 FROM @rows WHERE RemoteID IS NULL AND CommID IS NOT NULL)
+   BEGIN
+    SELECT TOP(1) @comm=CommID FROM @rows WHERE RemoteID IS NULL AND CommID IS NOT NULL ORDER BY RowOrder,CommID;
+    SET @remoteId=NULL;
+    SELECT TOP(1) @remoteId=d.id FROM @remote d JOIN @rows r ON r.CommID=@comm
+     WHERE NOT EXISTS(SELECT 1 FROM @rows used WHERE used.RemoteID=d.id)
+     AND COALESCE(d.CommType,N'')=COALESCE(r.CommType,N'') COLLATE Latin1_General_100_BIN2
+     AND COALESCE(d.ContactName,N'')=COALESCE(r.ContactName,N'') COLLATE Latin1_General_100_BIN2
+     AND COALESCE(d.Phone,N'')=COALESCE(r.Phone,N'') COLLATE Latin1_General_100_BIN2
+     AND COALESCE(d.Email,N'')=COALESCE(r.Email,N'') COLLATE Latin1_General_100_BIN2
+     AND TRIM(@noteTrim FROM REPLACE(REPLACE(COALESCE(d.Notes,N''),NCHAR(13)+NCHAR(10),NCHAR(10)),NCHAR(13),NCHAR(10)))=TRIM(@noteTrim FROM REPLACE(REPLACE(COALESCE(r.Notes,N''),NCHAR(13)+NCHAR(10),NCHAR(10)),NCHAR(13),NCHAR(10))) COLLATE Latin1_General_100_BIN2
+     AND COALESCE(d.Agent,N'')=COALESCE(r.Agent,N'') COLLATE Latin1_General_100_BIN2
+     AND d.CommTime=TRY_CONVERT(datetime,CONVERT(varchar(19),r.CommTime,126),126) ORDER BY d.id;
+    UPDATE @rows SET RemoteID=COALESCE(@remoteId,N'UNMATCHED') WHERE CommID=@comm;
+   END;
+   UPDATE @rows SET RemoteID=NULL WHERE RemoteID=N'UNMATCHED';
+   IF NOT EXISTS(SELECT 1 FROM @rows WHERE RemoteID IS NULL) AND (@closed=0 OR JSON_VALUE(@response,'$.data[0].CLOSED')=N'true') GOTO Confirmed;
+   -- CC_QUICK_LOG_RETRY_NO_APPEND_20261007: submitted logs are immutable; retries only confirm existing rows.
+   IF EXISTS(SELECT 1 FROM @rows WHERE RemoteID IS NULL)
+   BEGIN SET @state=N'Failed'; SET @error=N'Existing Zoho communications could not be matched. No communication was resent; reconcile this case before retrying.'; GOTO Failed; END;
+  END;
+  IF EXISTS(SELECT 1 FROM @rows WHERE (NULLIF(LTRIM(RTRIM(RawPhone)),N'') IS NOT NULL AND Phone IS NULL) OR DATALENGTH(Notes)>4000 OR NULLIF(LTRIM(RTRIM(Notes)),N'') IS NULL)
+  BEGIN SET @state=N'Failed'; SET @error=N'Check the saved phone number and communication notes (maximum 2000 characters).'; GOTO Failed; END;
+  IF (SELECT COUNT(*) FROM @remote)+(SELECT COUNT(*) FROM @rows WHERE RemoteID IS NULL)>100
+  BEGIN SET @state=N'Failed'; SET @error=N'This case would exceed the Zoho limit of 100 communications. Nothing was removed.'; GOTO Failed; END;
+  DECLARE @comms nvarchar(max),@summary nvarchar(max),@contact nvarchar(200),@phone nvarchar(32);
+  SELECT TOP(1) @contact=ContactName,@phone=Phone FROM @rows ORDER BY RowOrder,CommID;
+  SELECT @summary=STRING_AGG(CONVERT(nvarchar(max),Notes),NCHAR(10)+NCHAR(10)) WITHIN GROUP(ORDER BY RowOrder,CommID) FROM @rows;
+  -- v8 appends new rows without replacing existing rows. Never send an empty array.
+  -- Email_Address and the +02:00 timestamps match installed DispatchLink_PushZoho.
+  IF EXISTS(SELECT 1 FROM @rows WHERE RemoteID IS NULL)
+   SET @comms=(SELECT CommType AS CR_Event_Type_of_Comms,ContactName AS CR_Event_Contact_Name,Phone AS CR_Event_Contact_No,
+    Email AS Email_Address,Notes AS CR_Event_Comments1,Agent AS CR_Event_Control_Room_Agent,
+    CONVERT(varchar(19),CommTime,126)+'+02:00' AS CR_Event_Date_Time_of_Comms
+    FROM @rows WHERE RemoteID IS NULL ORDER BY RowOrder,CommID FOR JSON PATH);
+  SET @payload=(SELECT @id AS id,LEFT(@reg+N'_'+@event,120) AS Name,@reg AS Reg_No,CONVERT(varchar(19),@opened,126)+'+02:00' AS Date_Time_Case_Opened,
+   CASE WHEN @event=N'Fatigue Alert' THEN N'Bureau' ELSE N'Risk' END AS CC_Event_Type,q.incident_type AS Incident_Type,q.seat AS Seat,@agent AS Operator_Name,
+   CASE WHEN CONVERT(time,@opened)>='05:00:00' AND CONVERT(time,@opened)<'13:00:00' THEN N'Shift 1 (5am-1pm)' WHEN CONVERT(time,@opened)>='13:00:00' AND CONVERT(time,@opened)<'21:00:00' THEN N'Shift 2 (1pm-9pm)' ELSE N'Shift 3 (9pm-5am)' END AS Shift_No,
+   @contact AS CONTACT,@phone AS From_To_Alternative,
+   (SELECT TOP(1) a.zoho_id FROM dbo.accounts_zoho a JOIN ApplicationDb3.dbo.Companies c ON c.acc_no=a.Account_no JOIN ApplicationDb6.dbo.Vehicleinfo v ON v.Company=c.Company WHERE v.Reg_no=@reg) AS Lookup_1,
+   (SELECT TOP(1) a.Account_no FROM dbo.accounts_zoho a JOIN ApplicationDb3.dbo.Companies c ON c.acc_no=a.Account_no JOIN ApplicationDb6.dbo.Vehicleinfo v ON v.Company=c.Company WHERE v.Reg_no=@reg) AS Account_Status,
+   (SELECT TOP(1) v.VehDesc FROM ApplicationDb6.dbo.Vehicleinfo v WHERE v.Reg_no=@reg) AS FLEET_NUMBER,
+   @closed AS CLOSED,CASE WHEN @closed=1 THEN LEFT(@summary,2000) END AS Summary_of_Incident,
+   CASE WHEN @closed=1 THEN (SELECT TOP(1) Agent FROM @rows ORDER BY RowOrder DESC,CommID DESC) END AS Closed_by_Control_Room_Operator,
+   CASE WHEN @closed=1 THEN CONVERT(varchar(19),COALESCE(@closedAt,(SELECT MAX(CommTime) FROM @rows),@opened),126)+'+02:00' END AS Date_Time_Event_Closed,
+   JSON_QUERY(@comms) AS Communication_Log FROM dbo.CC_quick_log q WHERE q.seqno=@case FOR JSON PATH,WITHOUT_ARRAY_WRAPPER);
+  SET @payload=N'{"data":['+@payload+N'],"trigger":["approval","workflow","blueprint"]}';
+  SET @operation=CASE WHEN @id IS NULL THEN 'POST' ELSE 'PUT' END;
+  SET @url=N'https://example.invalid/configure-endpoint'+CASE WHEN @id IS NOT NULL THEN N'/'+@id ELSE N'' END;
+  IF @id IS NULL UPDATE ApplicationDb1.dbo.CCQuickLogSync SET CreateInFlight=1 WHERE CaseID=@case;
+  EXEC ApplicationDb1.dbo.CCQuickLog_Http @operation,@url,@payload,@http OUTPUT,@response OUTPUT,@transport OUTPUT;
+  IF @transport=-10001
+  BEGIN
+   UPDATE ApplicationDb1.dbo.CCQuickLogSync SET CreateInFlight=0 WHERE CaseID=@case;
+   SET @state=N'Retry'; SET @error=N'The Zoho token is unavailable; no request was sent.'; GOTO Failed;
+  END;
+  SET @code=CASE WHEN ISJSON(@response)=1 THEN COALESCE(JSON_VALUE(@response,'$.data[0].code'),JSON_VALUE(@response,'$.code')) END;
+  IF @transport<>0 OR @http IS NULL OR ISNULL(ISJSON(@response),0)<>1
+  BEGIN
+   SET @state=CASE WHEN @id IS NULL THEN N'Uncertain' ELSE N'Retry' END;
+   SET @error=CASE WHEN @id IS NULL THEN N'Zoho create result is unknown. Reconcile before retrying to prevent duplicates.' ELSE N'Zoho update could not be confirmed. The next attempt will GET and reconcile rows first.' END;
+   GOTO Failed;
+  END;
+  IF @code<>N'SUCCESS' OR @code IS NULL OR @http NOT BETWEEN 200 AND 299
+  BEGIN
+   SET @state=CASE WHEN @http IN(401,429) OR @code IN(N'INVALID_TOKEN',N'TOO_MANY_REQUESTS') THEN N'Retry' WHEN @http>=500 AND @id IS NULL THEN N'Uncertain' ELSE N'Failed' END;
+   SET @error=CONCAT(N'Zoho rejected the request: ',COALESCE(@code,N'UNKNOWN'),N'. Field: ',COALESCE(JSON_VALUE(@response,'$.data[0].details.api_name'),N'unspecified'),N'.');
+   IF @state<>N'Uncertain' UPDATE ApplicationDb1.dbo.CCQuickLogSync SET CreateInFlight=0 WHERE CaseID=@case;
+   GOTO Failed;
+  END;
+  IF @id IS NULL
+  BEGIN
+   SET @id=JSON_VALUE(@response,'$.data[0].details.id');
+   IF @id IS NULL OR @id COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9]%'
+   BEGIN SET @state=N'Uncertain'; SET @error=N'Zoho accepted the create but returned no usable ID. Reconcile before retrying.'; GOTO Failed; END;
+   BEGIN TRANSACTION;
+   UPDATE dbo.CC_quick_log SET zoho_id=@id WHERE seqno=@case;
+   UPDATE ApplicationDb1.dbo.CCQuickLogSync SET CreateInFlight=0 WHERE CaseID=@case;
+   COMMIT;
+  END;
+  -- Persist parent ID first. Confirmation is a separate GET/reconciliation run.
+  UPDATE ApplicationDb1.dbo.CCQuickLogSync SET SyncState=N'Retry',NextAttempt=DATEADD(second,10,SYSDATETIME()),LastError=N'Waiting for Zoho row/reference confirmation.' WHERE CaseID=@case AND Revision=@revision;
+  GOTO Finish;
+Confirmed:
+  IF NULLIF(LTRIM(RTRIM(@reference)),N'') IS NULL BEGIN SET @error=N'The Zoho parent exists; its incident reference is not available yet.'; GOTO Failed; END;
+  BEGIN TRANSACTION;
+  UPDATE c SET zoho_row_id=r.RemoteID,zoho_pushed=1,zoho_pushed_datetime=SYSDATETIME()
+   FROM ApplicationDb1.dbo.quick_log_Comments c JOIN @rows r ON r.CommID=c.comm_id WHERE c.case_id=@case AND r.RemoteID IS NOT NULL;
+  UPDATE dbo.CC_quick_log SET zoho_id=@id,reference=@reference,
+   zoho_insert=CASE WHEN EXISTS(SELECT 1 FROM ApplicationDb1.dbo.CCQuickLogSync WHERE CaseID=@case AND Revision=@revision) THEN 0 ELSE 1 END WHERE seqno=@case;
+  UPDATE ApplicationDb1.dbo.CCQuickLogSync SET SyncState=N'Complete',NextAttempt=SYSDATETIME(),LastError=NULL,CreateInFlight=0 WHERE CaseID=@case AND Revision=@revision;
+  COMMIT;
+  GOTO Finish;
+Failed:
+  UPDATE ApplicationDb1.dbo.CCQuickLogSync SET SyncState=@state,LastError=@error,
+   NextAttempt=DATEADD(second,CASE WHEN @attempts<5 THEN POWER(CONVERT(int,2),@attempts)*15 ELSE 900 END,SYSDATETIME())
+   WHERE CaseID=@case AND (Revision=@revision OR @state=N'Uncertain');
+ END TRY
+ BEGIN CATCH
+  IF XACT_STATE()<>0 ROLLBACK;
+  IF @case IS NOT NULL UPDATE ApplicationDb1.dbo.CCQuickLogSync SET
+   SyncState=CASE WHEN CreateInFlight=1 THEN N'Uncertain' ELSE N'Failed' END,
+   LastError=N'The quick-log worker failed. Review its database error before retrying.',NextAttempt=DATEADD(minute,15,SYSDATETIME()) WHERE CaseID=@case AND (Revision=@revision OR CreateInFlight=1);
+ END CATCH;
+Finish:
+ EXEC sys.sp_releaseapplock @Resource=N'CCQuickLogWorkerV2',@LockOwner='Session';
+END;
+
+GO

@@ -1,0 +1,233 @@
+{
+  "site_1": {
+    "id": "site_1",
+    "title": "Client site 1",
+    "instructions": "Configure the private escalation policy before use.",
+    "dayContacts": [
+      {
+        "slot": 1,
+        "name": "Example Contact 01",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 2,
+        "name": "Example Contact 02",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 3,
+        "name": "Example Contact 03",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      }
+    ]
+  },
+  "site_2": {
+    "id": "site_2",
+    "title": "Client site 2",
+    "instructions": "Configure the private escalation policy before use.",
+    "dayContacts": [
+      {
+        "slot": 1,
+        "name": "Example Contact 04",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 2,
+        "name": "Example Contact 05",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 3,
+        "name": "Example Contact 06",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      }
+    ]
+  },
+  "site_3": {
+    "id": "site_3",
+    "title": "Client site 3",
+    "instructions": "Configure the private escalation policy before use.",
+    "dayContacts": [
+      {
+        "slot": 1,
+        "name": "Example Contact 07",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 2,
+        "name": "Example Contact 08",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 3,
+        "name": "Example Contact 09",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      }
+    ]
+  },
+  "site_4": {
+    "id": "site_4",
+    "title": "Client site 4",
+    "instructions": "Configure the private escalation policy before use.",
+    "dayContacts": [
+      {
+        "slot": 1,
+        "name": "Example Contact 04",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 2,
+        "name": "Example Contact 05",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 3,
+        "name": "Example Contact 06",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 4,
+        "name": "Example Contact 10",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 5,
+        "name": "Example Contact 11",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 6,
+        "name": "Example Contact 12",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 7,
+        "name": "Example Contact 13",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      }
+    ]
+  },
+  "site_5": {
+    "id": "site_5",
+    "title": "Client site 5",
+    "instructions": "Configure the private escalation policy before use.",
+    "dayContacts": [
+      {
+        "slot": 1,
+        "name": "Example Contact 04",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 2,
+        "name": "Example Contact 05",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 3,
+        "name": "Example Contact 06",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 4,
+        "name": "Example Contact 10",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 5,
+        "name": "Example Contact 11",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 6,
+        "name": "Example Contact 11",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      }
+    ]
+  },
+  "site_6": {
+    "id": "site_6",
+    "title": "Client site 6",
+    "instructions": "Configure the private escalation policy before use.",
+    "dayContacts": [
+      {
+        "slot": 1,
+        "name": "Example Contact 04",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 2,
+        "name": "Example Contact 05",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 3,
+        "name": "Example Contact 06",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 4,
+        "name": "Example Contact 10",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      },
+      {
+        "slot": 5,
+        "name": "Example Contact 11",
+        "number": "",
+        "altNumber": "",
+        "notes": ""
+      }
+    ]
+  }
+}

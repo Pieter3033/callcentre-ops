@@ -1,0 +1,112 @@
+-- Prepared only. Installing changes the shared database.
+USE ApplicationDb1;
+GO
+CREATE OR ALTER TRIGGER dbo.CCQuickLogRequests_Insert ON dbo.CCQuickLogRequests
+INSTEAD OF INSERT AS
+BEGIN
+ -- CC_QUICK_LOG_V2_20261006
+ -- CC_QUICK_LOG_EDITABLE_20261006
+ -- CC_QUICK_LOG_ACCOUNT_20261116
+ SET NOCOUNT ON;
+ SET XACT_ABORT ON;
+ IF (SELECT COUNT(*) FROM inserted)<>1 THROW 51000,N'CC_REQUEST_SINGLE: submit one request at a time.',1;
+ DECLARE @id uniqueidentifier,@session nvarchar(max),@csrf nvarchar(max),@caseText nvarchar(max),@reg nvarchar(max),@event nvarchar(max),@seatText nvarchar(max),@json nvarchar(max);
+ SELECT @id=SubmissionID,@session=InputSession,@csrf=InputCsrf,@caseText=InputCaseID,@reg=UPPER(LTRIM(RTRIM(InputRegNo))),@event=LTRIM(RTRIM(InputEvent)),@seatText=InputSeat,@json=InputComments FROM inserted;
+ DECLARE @username nvarchar(200),@agent nvarchar(200),@seat nvarchar(50),@case int=TRY_CONVERT(int,NULLIF(@caseText,N'')),@lock int;
+ SELECT TOP(1) @username=u.Username,@agent=COALESCE(NULLIF(LTRIM(RTRIM(CONCAT(u.Name,N' ',u.Surname))),N''),u.Username)
+ FROM ApplicationDb3.dbo.Current_session s JOIN ApplicationDb3.dbo.User_info u ON LOWER(LTRIM(RTRIM(u.Username)))=LOWER(LTRIM(RTRIM(s.Username)))
+ WHERE s.session_id=@session AND TRY_CONVERT(int,u.Usertype) IN(7,8,14) ORDER BY u.Seqno;
+ IF @username IS NULL OR @csrf IS NULL OR @csrf<>CONVERT(varchar(64),HASHBYTES('SHA2_256',CONVERT(nvarchar(max),N'CCQuickLog:'+@session)),2)
+  THROW 51000,N'CC_AUTH: sign in again before submitting.',1;
+ IF @id IS NULL THROW 51000,N'CC_REQUEST_ID: a stable submission ID is required.',1;
+ DECLARE @resource nvarchar(255)=N'CCQuickLogSubmit:'+CONVERT(nvarchar(36),@id);
+ EXEC @lock=sys.sp_getapplock @Resource=@resource,@LockMode='Exclusive',@LockOwner='Transaction',@LockTimeout=10000;
+ IF @lock<0 THROW 51000,N'CC_BUSY: retry this same request.',1;
+ DECLARE @hash varbinary(32)=HASHBYTES('SHA2_256',CONVERT(nvarchar(max),CONCAT(COALESCE(@caseText,N''),N'|',@reg,N'|',@event,N'|',@seatText,N'|',@json)));
+ IF EXISTS(SELECT 1 FROM dbo.CCQuickLogRequests WHERE SubmissionID=@id)
+ BEGIN
+  IF NOT EXISTS(SELECT 1 FROM dbo.CCQuickLogRequests WHERE SubmissionID=@id AND Username=@username AND PayloadHash=@hash)
+   THROW 51000,N'CC_REQUEST_CONFLICT: this request ID belongs to different entries.',1;
+  RETURN; -- An exact retry is a no-op and the endpoint reads its original confirmation.
+ END;
+ IF NULLIF(@reg,N'') IS NULL OR DATALENGTH(@reg)>100 OR NULLIF(@event,N'') IS NULL OR DATALENGTH(@event)>200
+  THROW 51000,N'CC_CONTEXT: registration or event is missing or too long.',1;
+ IF NULLIF(@caseText,N'') IS NOT NULL AND @case IS NULL THROW 51000,N'CC_CASE: invalid case ID.',1;
+ SELECT @seat=seat FROM ApplicationDb5.dbo.cc_seats WHERE id=TRY_CONVERT(int,@seatText) AND NULLIF(LTRIM(RTRIM(seat)),N'') NOT IN(N'...');
+ IF @seat IS NULL THROW 51000,N'CC_SEAT: select a valid seat.',1;
+ -- A selected account is independent of the registration and parent record ID.
+ DECLARE @accountId nvarchar(max)=NULLIF(LTRIM(RTRIM(JSON_VALUE(CASE WHEN ISJSON(@json)=1 THEN @json ELSE N'{}' END,'$.accountId'))),N'');
+ IF @accountId IS NOT NULL AND (DATALENGTH(@accountId)>400 OR NOT EXISTS(
+  SELECT 1 FROM ApplicationDb5.dbo.Accounts_ZOHO a WHERE NULLIF(LTRIM(RTRIM(a.zoho_id)),N'')=@accountId
+ )) THROW 51000,N'CC_ACCOUNT: select a valid Zoho account.',1;
+ DECLARE @baseSnapshot nvarchar(64)=JSON_VALUE(CASE WHEN ISJSON(@json)=1 THEN @json ELSE N'{}' END,'$.baseSnapshot');
+ IF ISJSON(@json)<>1 OR ISNULL(JSON_VALUE(@json,'$.version'),N'')<>N'3' THROW 51000,N'CC_ROWS: reload the updated Communication Log before submitting.',1;
+ SET @json=JSON_QUERY(@json,'$.rows');
+ IF ISNULL(ISJSON(@json),0)<>1 OR LEFT(LTRIM(@json),1)<>N'[' THROW 51000,N'CC_ROWS: invalid communication array.',1;
+ DECLARE @rows TABLE(RowOrder int PRIMARY KEY,RawCommID nvarchar(max),CommID int,CommType nvarchar(max),ContactName nvarchar(max),RawPhone nvarchar(max),Phone nvarchar(32),Email nvarchar(max),Notes nvarchar(max),DateText nvarchar(max),CommTime datetime);
+ IF EXISTS(SELECT 1 FROM OPENJSON(@json) WHERE type<>5) THROW 51000,N'CC_ROWS: each communication must be an object.',1;
+ IF (SELECT COUNT(*) FROM OPENJSON(@json)) NOT BETWEEN 1 AND 100 THROW 51000,N'CC_ROWS: submit 1 to 100 communications.',1;
+ INSERT @rows SELECT TRY_CONVERT(int,r.[key])+1,p.comm_id,TRY_CONVERT(int,p.comm_id),LTRIM(RTRIM(p.comm_type)),NULLIF(LTRIM(RTRIM(p.contact_name)),N''),NULLIF(LTRIM(RTRIM(p.contact_no)),N''),
+ dbo.CCQuickLog_NormalizePhone(p.contact_no),NULLIF(LTRIM(RTRIM(p.email_address)),N''),p.comments,p.datetime_comm,TRY_CONVERT(datetime,p.datetime_comm,120)
+ FROM OPENJSON(@json) r CROSS APPLY OPENJSON(r.value) WITH(comm_id nvarchar(max),comm_type nvarchar(max),contact_name nvarchar(max),contact_no nvarchar(max),email_address nvarchar(max),comments nvarchar(max),datetime_comm nvarchar(max)) p;
+ DECLARE @count int=(SELECT COUNT(*) FROM @rows);
+ IF @count NOT BETWEEN 1 AND 100 THROW 51000,N'CC_ROWS: submit 1 to 100 communications.',1;
+ IF EXISTS(SELECT 1 FROM @rows r WHERE NULLIF(r.CommType,N'') IS NULL OR NOT EXISTS(SELECT 1 FROM ApplicationDb5.dbo.CC_comm_types t WHERE t.type=r.CommType AND t.type<>N'...')
+  OR r.CommTime IS NULL OR DATALENGTH(r.DateText)<>38 OR CONVERT(nvarchar(19),r.CommTime,120)<>r.DateText COLLATE Latin1_General_100_BIN2 OR NULLIF(LTRIM(RTRIM(r.Notes)),N'') IS NULL OR DATALENGTH(r.Notes)>4000
+  OR DATALENGTH(r.ContactName)>400 OR DATALENGTH(r.Email)>400 OR (r.RawPhone IS NOT NULL AND r.Phone IS NULL)
+  OR (r.Email IS NOT NULL AND (r.Email NOT LIKE N'%_@_%._%' OR r.Email LIKE N'%[ '+NCHAR(9)+NCHAR(10)+NCHAR(13)+N']%')))
+  THROW 51000,N'CC_VALIDATION: check type, date, phone, email and notes (maximum 2000 characters).',1;
+ IF EXISTS(SELECT 1 FROM @rows WHERE RawCommID IS NOT NULL AND (CommID IS NULL OR CommID<0))
+  OR EXISTS(SELECT CommID FROM @rows WHERE CommID IS NOT NULL GROUP BY CommID HAVING COUNT(*)>1)
+  THROW 51000,N'CC_ROWS: communication IDs are invalid or repeated.',1;
+ DECLARE @legacy bit=0;
+ IF @case IS NULL
+ BEGIN
+  IF EXISTS(SELECT 1 FROM @rows WHERE CommID IS NOT NULL) THROW 51000,N'CC_ROWS: a new case cannot contain existing communication IDs.',1;
+  DECLARE @newCase TABLE(id int);
+  INSERT ApplicationDb5.dbo.CC_quick_log(reg_no,company,event,datetime_opened,incident_type,seat,cc_operator,c_name,c_number,comm_type,datetime_comm,comments,[close],zoho_insert)
+  OUTPUT inserted.seqno INTO @newCase
+  SELECT @reg,(SELECT TOP(1) Company FROM ApplicationDb6.dbo.Vehicleinfo WHERE UPPER(LTRIM(RTRIM(Reg_no)))=@reg),@event,SYSDATETIME(),@event,@seat,@agent,r.ContactName,r.Phone,r.CommType,r.CommTime,r.Notes,N'1',0 FROM @rows r WHERE RowOrder=1;
+  SELECT @case=id FROM @newCase;
+ END
+ ELSE
+ BEGIN
+  IF NOT EXISTS(SELECT 1 FROM ApplicationDb5.dbo.CC_quick_log WITH(UPDLOCK,HOLDLOCK) WHERE seqno=@case AND UPPER(LTRIM(RTRIM(reg_no)))=@reg AND event=@event
+   AND LOWER(LTRIM(RTRIM(cc_operator))) IN(LOWER(@username),LOWER(@agent)))
+   THROW 51000,N'CC_CASE: this case does not match the requested operator, registration or event.',1;
+  IF EXISTS(SELECT 1 FROM ApplicationDb5.dbo.CC_quick_log WHERE seqno=@case AND (TRY_CONVERT(int,[close])=1 OR zoho_insert=3 OR NULLIF(LTRIM(RTRIM(zoho_id)),N'') IS NOT NULL OR NULLIF(LTRIM(RTRIM(reference)),N'') IS NOT NULL))
+   OR EXISTS(SELECT 1 FROM dbo.CCQuickLogSync WHERE CaseID=@case AND (SyncState IN(N'Sending',N'Uncertain',N'Complete') OR CreateInFlight=1))
+   OR EXISTS(SELECT 1 FROM dbo.quick_log_Comments WHERE case_id=@case AND (zoho_pushed=1 OR zoho_row_id IS NOT NULL))
+   THROW 51000,N'CC_RECONCILE: closed or previously pushed logs cannot be edited here. Ask an administrator to reconcile the case.',1;
+  IF NOT EXISTS(SELECT 1 FROM dbo.CCQuickLogSync WHERE CaseID=@case)
+   AND EXISTS(SELECT 1 FROM ApplicationDb5.dbo.CC_quick_log q WHERE q.seqno=@case AND NULLIF(LTRIM(RTRIM(q.zoho_id)),N'') IS NULL
+    AND (q.datetime_opened IS NULL OR q.datetime_opened<(SELECT modify_date FROM ApplicationDb5.sys.objects WHERE object_id=OBJECT_ID('ApplicationDb5.dbo.CC_quick_log_sp','P'))))
+   THROW 51000,N'CC_RECONCILE: reconcile the historical case before submitting its edited communications.',1;
+  DECLARE @currentSnapshot nvarchar(64);
+  SELECT @currentSnapshot=CONVERT(varchar(64),HASHBYTES('SHA2_256',CONVERT(nvarchar(max),(SELECT q.reg_no,q.event,q.seat,q.cc_operator,q.c_name,q.c_number,q.comm_type,q.datetime_comm,q.comments,q.[close],q.zoho_insert,q.zoho_id,q.reference,
+ JSON_QUERY((SELECT c.comm_id,c.comm_type,c.contact_name,c.contact_no,c.email_address,c.comments,c.cc_operator,c.datetime_comm,c.zoho_pushed,c.DisplayOrder FROM ApplicationDb1.dbo.quick_log_Comments c WHERE c.case_id=q.seqno ORDER BY c.comm_id FOR JSON PATH,INCLUDE_NULL_VALUES)) AS communications
+ FOR JSON PATH,INCLUDE_NULL_VALUES,WITHOUT_ARRAY_WRAPPER))),2) FROM ApplicationDb5.dbo.CC_quick_log q WHERE q.seqno=@case;
+  IF @baseSnapshot IS NULL OR @baseSnapshot<>@currentSnapshot COLLATE Latin1_General_100_BIN2
+   THROW 51000,N'CC_STALE: this log changed after you opened it. Reload the current log before submitting. Your browser draft has been kept.',1;
+  SET @legacy=CASE WHEN EXISTS(SELECT 1 FROM dbo.quick_log_Comments WHERE case_id=@case) THEN 0 ELSE 1 END;
+  IF EXISTS(SELECT 1 FROM @rows r WHERE r.CommID IS NOT NULL AND ((r.CommID=0 AND @legacy=0) OR (r.CommID>0 AND NOT EXISTS(SELECT 1 FROM dbo.quick_log_Comments c WHERE c.case_id=@case AND c.comm_id=r.CommID))))
+   THROW 51000,N'CC_ROWS: an existing communication does not belong to this log.',1;
+  -- Only unsubmitted, unpushed rows may be removed. This runs inside the request transaction.
+  DELETE c FROM dbo.quick_log_Comments c WHERE c.case_id=@case AND ISNULL(c.zoho_pushed,0)=0 AND c.zoho_row_id IS NULL AND NOT EXISTS(SELECT 1 FROM @rows r WHERE r.CommID=c.comm_id);
+  UPDATE c SET comm_type=r.CommType,contact_name=r.ContactName,contact_no=r.Phone,email_address=r.Email,comments=r.Notes,datetime_comm=r.CommTime,DisplayOrder=r.RowOrder,SubmissionID=@id
+   FROM dbo.quick_log_Comments c JOIN @rows r ON r.CommID=c.comm_id WHERE c.case_id=@case;
+ END;
+ INSERT dbo.quick_log_Comments(case_id,comm_type,contact_name,contact_no,email_address,comments,cc_operator,datetime_comm,DisplayOrder,SubmissionID,zoho_pushed)
+ SELECT @case,r.CommType,r.ContactName,r.Phone,r.Email,r.Notes,CASE WHEN r.CommID=0 AND @legacy=1 THEN (SELECT cc_operator FROM ApplicationDb5.dbo.CC_quick_log WHERE seqno=@case) ELSE @agent END,r.CommTime,r.RowOrder,@id,0 FROM @rows r WHERE r.CommID IS NULL OR r.CommID=0;
+ DECLARE @saved int=(SELECT COUNT(*) FROM dbo.quick_log_Comments WHERE case_id=@case);
+ IF @saved<>@count THROW 51000,N'CC_SAVE_COUNT: the full communication set could not be saved.',1;
+ UPDATE q SET seat=@seat,c_name=r.ContactName,c_number=r.Phone,comm_type=r.CommType,datetime_comm=r.CommTime,comments=r.Notes
+ FROM ApplicationDb5.dbo.CC_quick_log q CROSS JOIN @rows r WHERE q.seqno=@case AND r.RowOrder=1;
+ UPDATE ApplicationDb5.dbo.CC_quick_log SET [close]=N'1',zoho_insert=1 WHERE seqno=@case;
+ MERGE dbo.CCQuickLogSync WITH(HOLDLOCK) AS target USING(SELECT @case AS CaseID) source ON target.CaseID=source.CaseID
+ WHEN MATCHED THEN UPDATE SET SyncState=N'Pending',Revision=target.Revision+1,Attempts=0,NextAttempt=SYSDATETIME(),ClosedAt=SYSDATETIME(),LastError=NULL,AccountZohoID=COALESCE(@accountId,target.AccountZohoID)
+ WHEN NOT MATCHED THEN INSERT(CaseID,SyncState,ClosedAt,AccountZohoID) VALUES(@case,N'Pending',SYSDATETIME(),@accountId);
+ INSERT dbo.CCQuickLogRequests(SubmissionID,Username,PayloadHash,CaseID,SavedCount) VALUES(@id,@username,@hash,@case,@saved);
+END;
+
+GO

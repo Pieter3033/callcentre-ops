@@ -1,0 +1,43 @@
+# Local verification output, backups, and screenshots
+/outputs/
+/LOCAL_READY_*.txt
+/*_verify.png
+*.bak
+*.log
+
+# Frontend dependencies and generated builds
+**/node_modules/
+**/dist/
+**/.vite/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+sqlpage.json
+*.dsn
+*.udl
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Local databases and database backups
+*.db
+*.sqlite
+*.sqlite3
+*.mdf
+*.ldf
+*.bacpac
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Private runtime assets and operational records
+**/favicon.png
+**/logowhite_3.png
+**/*verified_recovery*

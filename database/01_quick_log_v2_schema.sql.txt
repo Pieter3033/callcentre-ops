@@ -1,0 +1,75 @@
+-- REVIEW ONLY: installation changes the shared database. No backlog is requeued.
+USE ApplicationDb1;
+GO
+CREATE OR ALTER FUNCTION dbo.CCQuickLog_NormalizePhone(@value nvarchar(max))
+RETURNS nvarchar(32)
+AS
+BEGIN
+ -- CC_QUICK_LOG_PHONE_20261006
+ DECLARE @trimChars nvarchar(3)=N' '+NCHAR(160)+NCHAR(8239);
+ DECLARE @phone nvarchar(max)=TRIM(@trimChars FROM @value);
+ IF @phone IS NULL OR @phone=N'' OR DATALENGTH(@phone)>160 RETURN NULL;
+ SET @phone=REPLACE(REPLACE(REPLACE(REPLACE(@phone COLLATE Latin1_General_100_BIN2,N' ',N''),NCHAR(160),N''),NCHAR(8239),N''),N'-',N'');
+ DECLARE @open int=CHARINDEX(N'(',@phone),@close int=CHARINDEX(N')',@phone);
+ IF @open>0 OR @close>0
+ BEGIN
+  IF @open=0 OR @close<=@open+1 OR @close-@open-1>4 OR CHARINDEX(N'(',@phone,@open+1)>0 OR CHARINDEX(N')',@phone,@close+1)>0 RETURN NULL;
+  IF SUBSTRING(@phone,@open+1,@close-@open-1) COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9]%' RETURN NULL;
+ END;
+ IF LEFT(@phone,6)=N'+27(0)' SET @phone=N'+27'+SUBSTRING(@phone,7,LEN(@phone));
+ IF LEFT(@phone,7)=N'0027(0)' SET @phone=N'0027'+SUBSTRING(@phone,8,LEN(@phone));
+ SET @phone=REPLACE(REPLACE(@phone,N'(',N''),N')',N'');
+ IF LEFT(@phone,2)=N'00' SET @phone=N'+'+SUBSTRING(@phone,3,LEN(@phone));
+ DECLARE @digits nvarchar(max)=CASE WHEN LEFT(@phone,1)=N'+' THEN SUBSTRING(@phone,2,LEN(@phone)) ELSE @phone END;
+ IF @digits COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9]%' RETURN NULL;
+ IF LEFT(@phone,3)=N'+27'
+ BEGIN
+  IF LEN(@phone)<>12 OR SUBSTRING(@phone,4,1)=N'0' RETURN NULL;
+ END
+ ELSE IF LEFT(@phone,1)=N'+'
+ BEGIN
+  IF LEN(@digits) NOT BETWEEN 7 AND 15 OR LEFT(@digits,1)=N'0' RETURN NULL;
+ END
+ ELSE IF LEN(@phone)<>10 OR LEFT(@phone,1)<>N'0' RETURN NULL;
+ RETURN CONVERT(nvarchar(32),@phone);
+END;
+GO
+IF OBJECT_ID('dbo.CCQuickLogRequests','U') IS NULL
+ CREATE TABLE dbo.CCQuickLogRequests(
+  SubmissionID uniqueidentifier NOT NULL CONSTRAINT PK_CCQuickLogRequests PRIMARY KEY,
+  Username nvarchar(200) NULL,PayloadHash varbinary(32) NULL,CaseID int NULL,SavedCount int NULL,
+  SubmittedAt datetime2(3) NOT NULL CONSTRAINT DF_CCQuickLogRequestTime DEFAULT SYSDATETIME(),
+  -- Input-only fields consumed by the INSTEAD OF INSERT trigger; persisted NULL.
+  InputSession nvarchar(max) NULL,InputCsrf nvarchar(max) NULL,InputCaseID nvarchar(max) NULL,
+  InputRegNo nvarchar(max) NULL,InputEvent nvarchar(max) NULL,InputSeat nvarchar(max) NULL,InputComments nvarchar(max) NULL,
+  CONSTRAINT CK_CCQuickLogRequestInputs CHECK(InputSession IS NULL AND InputCsrf IS NULL AND InputCaseID IS NULL AND InputRegNo IS NULL AND InputEvent IS NULL AND InputSeat IS NULL AND InputComments IS NULL)
+ );
+IF OBJECT_ID('dbo.CCQuickLogSync','U') IS NULL
+ CREATE TABLE dbo.CCQuickLogSync(
+  CaseID int NOT NULL CONSTRAINT PK_CCQuickLogSync PRIMARY KEY,
+  SyncState nvarchar(24) NOT NULL CONSTRAINT DF_CCQuickLogState DEFAULT N'Pending',
+  Revision int NOT NULL CONSTRAINT DF_CCQuickLogRevision DEFAULT 1,
+  Attempts int NOT NULL CONSTRAINT DF_CCQuickLogAttempts DEFAULT 0,
+  NextAttempt datetime2(3) NOT NULL CONSTRAINT DF_CCQuickLogNext DEFAULT SYSDATETIME(),
+  LastAttempt datetime2(3) NULL,ClosedAt datetime2(3) NULL,LastError nvarchar(500) NULL,
+  CreateInFlight bit NOT NULL CONSTRAINT DF_CCQuickLogCreateInFlight DEFAULT 0,
+  CONSTRAINT CK_CCQuickLogState CHECK(SyncState IN(N'Pending',N'Sending',N'Retry',N'Failed',N'Uncertain',N'Complete'))
+ );
+IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID('dbo.CCQuickLogSync') AND name=N'IX_CCQuickLogDue')
+ CREATE INDEX IX_CCQuickLogDue ON dbo.CCQuickLogSync(SyncState,NextAttempt) INCLUDE(CaseID,Attempts,Revision);
+IF COL_LENGTH('dbo.CCQuickLogSync','CreateInFlight') IS NULL
+ ALTER TABLE dbo.CCQuickLogSync ADD CreateInFlight bit NOT NULL CONSTRAINT DF_CCQuickLogCreateInFlight DEFAULT 0;
+GO
+USE ApplicationDb1;
+GO
+IF COL_LENGTH('dbo.quick_log_Comments','DisplayOrder') IS NULL ALTER TABLE dbo.quick_log_Comments ADD DisplayOrder int NULL;
+IF COL_LENGTH('dbo.quick_log_Comments','SubmissionID') IS NULL ALTER TABLE dbo.quick_log_Comments ADD SubmissionID uniqueidentifier NULL;
+IF COL_LENGTH('dbo.quick_log_Comments','zoho_row_id') IS NULL ALTER TABLE dbo.quick_log_Comments ADD zoho_row_id nvarchar(50) NULL;
+IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID('dbo.quick_log_Comments') AND name=N'IX_QuickLogCaseOrder')
+ CREATE INDEX IX_QuickLogCaseOrder ON dbo.quick_log_Comments(case_id,DisplayOrder,comm_id);
+GO
+
+-- Optional selected-account context; the Call Centre parent ID stays in CC_quick_log.zoho_id.
+IF COL_LENGTH(N'ApplicationDb1.dbo.CCQuickLogSync',N'AccountZohoID') IS NULL
+ ALTER TABLE ApplicationDb1.dbo.CCQuickLogSync ADD AccountZohoID nvarchar(200) NULL;
+GO

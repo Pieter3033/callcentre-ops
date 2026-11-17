@@ -1,0 +1,4 @@
+SELECT 'json' AS component,(SELECT CAST(0 AS bit) AS success,
+ CASE WHEN NOT EXISTS(SELECT 1 FROM ApplicationDb3.dbo.Current_session s JOIN ApplicationDb3.dbo.User_info u ON LOWER(LTRIM(RTRIM(u.Username)))=LOWER(LTRIM(RTRIM(s.Username))) WHERE s.session_id=sqlpage.cookie('session') AND TRY_CONVERT(int,u.Usertype) IN(7,8,14)) THEN N'unauthorized' ELSE N'backend_unavailable' END AS status,
+ CASE WHEN NOT EXISTS(SELECT 1 FROM ApplicationDb3.dbo.Current_session s JOIN ApplicationDb3.dbo.User_info u ON LOWER(LTRIM(RTRIM(u.Username)))=LOWER(LTRIM(RTRIM(s.Username))) WHERE s.session_id=sqlpage.cookie('session') AND TRY_CONVERT(int,u.Usertype) IN(7,8,14)) THEN N'Sign in with an authorized CC operator account.' ELSE N'Submission is not ready. Your browser draft has been preserved.' END AS message
+ FOR JSON PATH,WITHOUT_ARRAY_WRAPPER) AS contents;
